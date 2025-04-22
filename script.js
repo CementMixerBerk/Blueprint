@@ -60,7 +60,7 @@ let currentUser = null;
 
 function updateAuthUI(user, username) {
   if (user) {
-    const displayName = username || user.email.split('@')[0];
+    const displayName = username || 'User';
     authButtons.innerHTML = `
       <span class="welcome-message">Welcome, ${displayName}!</span>
       <button id="logoutBtn" class="auth-btn">Logout</button>
@@ -86,8 +86,8 @@ function showLoginModal() {
     <div class="auth-modal">
       <h2>Login</h2>
       <div class="auth-group">
-        <label>Email:</label>
-        <input type="email" id="loginEmail" placeholder="Enter email">
+        <label>Username:</label>
+        <input type="text" id="loginUsername" placeholder="Enter username">
       </div>
       <div class="auth-group">
         <label>Password:</label>
@@ -154,26 +154,46 @@ function showSignupModal() {
   });
 }
 
-function handleLogin() {
-  const email = document.getElementById('loginEmail').value;
+async function handleLogin() {
+  const username = document.getElementById('loginUsername').value;
   const password = document.getElementById('loginPassword').value;
   const errorDiv = document.getElementById('loginError');
 
-  if (!email || !password) {
+  if (!username || !password) {
     errorDiv.textContent = 'Please fill in all fields';
     return;
   }
 
-  firebase.auth().signInWithEmailAndPassword(email, password)
-    .then((userCredential) => {
-      document.querySelector('.modal-overlay').remove();
-    })
-    .catch((error) => {
-      errorDiv.textContent = error.message;
-    });
+  try {
+    // Find user by username
+    const usersRef = firebase.database().ref('users');
+    const snapshot = await usersRef.orderByChild('username').equalTo(username).once('value');
+    const users = snapshot.val();
+
+    if (!users) {
+      errorDiv.textContent = 'Username not found';
+      return;
+    }
+
+    const userId = Object.keys(users)[0];
+    const userData = users[userId];
+    const email = userData.email;
+
+    if (!email) {
+      errorDiv.textContent = 'No email associated with this username';
+      return;
+    }
+
+    await firebase.auth().signInWithEmailAndPassword(email, password);
+    const overlay = document.querySelector('.modal-overlay');
+    if (overlay) overlay.remove();
+  } catch (error) {
+    console.error('Login error:', error);
+    errorDiv.textContent = error.message || 'An error occurred during login';
+  }
 }
 
-function handleSignup() {
+async function handleSignup() {
   const username = document.getElementById('signupUsername').value;
   const email = document.getElementById('signupEmail').value;
   const password = document.getElementById('signupPassword').value;
@@ -190,24 +210,30 @@ function handleSignup() {
     return;
   }
 
-  firebase.auth().createUserWithEmailAndPassword(email, password)
-    .then((userCredential) => {
-      const user = userCredential.user;
-      firebase.database().ref('users/' + user.uid).set({
-        username: username,
-        email: email,
-        favoritesPublic: false
-      })
-        .then(() => {
-          document.querySelector('.modal-overlay').remove();
-        })
-        .catch((error) => {
-          errorDiv.textContent = 'Error saving user data: ' + error.message;
-        });
-    })
-    .catch((error) => {
-      errorDiv.textContent = error.message;
+  try {
+    // Check if username already exists
+    const usersRef = firebase.database().ref('users');
+    const snapshot = await usersRef.orderByChild('username').equalTo(username).once('value');
+    if (snapshot.exists()) {
+      errorDiv.textContent = 'Username already taken';
+      return;
+    }
+
+    // Proceed with signup
+    const userCredential = await firebase.auth().createUserWithEmailAndPassword(email, password);
+    const user = userCredential.user;
+    await firebase.database().ref('users/' + user.uid).set({
+      username: username,
+      email: email,
+      favoritesPublic: false
     });
+
+    const overlay = document.querySelector('.modal-overlay');
+    if (overlay) overlay.remove();
+  } catch (error) {
+    console.error('Signup error:', error);
+    errorDiv.textContent = error.message || 'An error occurred during signup';
+  }
 }
 
 function logout() {
@@ -225,35 +251,29 @@ function logout() {
 // Preload user favorites on auth state change
 firebase.auth().onAuthStateChanged(async (user) => {
   if (user) {
-    firebase.database().ref('users/' + user.uid).once('value')
-      .then(async (snapshot) => {
-        const userData = snapshot.val();
-        const username = userData ? userData.username : null;
-        updateAuthUI(user, username);
-        currentUser = user;
+    try {
+      const snapshot = await firebase.database().ref('users/' + user.uid).once('value');
+      const userData = snapshot.val();
+      const username = userData ? userData.username : null;
+      updateAuthUI(user, username);
+      currentUser = user;
 
-        // Preload user favorites and order
-        try {
-          const favoritesRef = firebase.database().ref(`users/${user.uid}/favorites`);
-          const orderRef = firebase.database().ref(`users/${user.uid}/favoritesOrder`);
-          const [favoritesSnapshot, orderSnapshot] = await Promise.all([
-            favoritesRef.once('value'),
-            orderRef.once('value')
-          ]);
-          cachedUserFavorites = favoritesSnapshot.val();
-          cachedFavoritesOrder = orderSnapshot.val() || [];
-        } catch (error) {
-          console.error('Error preloading favorites:', error);
-        }
-
-        loadFavorites();
-      })
-      .catch((error) => {
-        console.error('Error fetching user data:', error);
-        updateAuthUI(user, null);
-        currentUser = user;
-        loadFavorites();
-      });
+      // Preload user favorites and order
+      const favoritesRef = firebase.database().ref(`users/${user.uid}/favorites`);
+      const orderRef = firebase.database().ref(`users/${user.uid}/favoritesOrder`);
+      const [favoritesSnapshot, orderSnapshot] = await Promise.all([
+        favoritesRef.once('value'),
+        orderRef.once('value')
+      ]);
+      cachedUserFavorites = favoritesSnapshot.val();
+      cachedFavoritesOrder = orderSnapshot.val() || [];
+      loadFavorites();
+    } catch (error) {
+      console.error('Error fetching user data:', error);
+      updateAuthUI(user, null);
+      currentUser = user;
+      loadFavorites();
+    }
   } else {
     updateAuthUI(null, null);
     currentUser = null;
@@ -265,7 +285,7 @@ firebase.auth().onAuthStateChanged(async (user) => {
 });
 
 let jokersData = [];
-let currentSort = 'most-recent';
+let currentSort = 'cost-asc';
 let currentSearch = '';
 
 function loadJokersData() {
